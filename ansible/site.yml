@@ -1,0 +1,162 @@
+---
+- name: Install container runtime when required
+  hosts: all
+  become: true
+  tasks:
+    - name: Require a Debian-family guest for Docker-based environments
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "A Docker/Swarm setup currently requires a Debian-family guest."
+      when: lab_environment in ["docker", "swarm"]
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+        update_cache: true
+      when: lab_environment in ["docker", "swarm"]
+
+    - name: Start and enable Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+      when: lab_environment in ["docker", "swarm"]
+
+- name: Initialize Docker Swarm manager
+  hosts: masters
+  become: true
+  tasks:
+    - name: Read current Swarm state
+      ansible.builtin.command: docker info
+      changed_when: false
+      register: swarm_info
+      when: lab_environment == "swarm"
+
+    - name: Initialize the Swarm
+      ansible.builtin.command: "docker swarm init --advertise-addr {{ ansible_host }}"
+      when: 'lab_environment == "swarm" and "Swarm: active" not in swarm_info.stdout'
+
+    - name: Read worker join token
+      ansible.builtin.command: docker swarm join-token -q worker
+      changed_when: false
+      register: swarm_token
+      when: lab_environment == "swarm"
+
+    - name: Share worker join token with this play
+      ansible.builtin.set_fact:
+        swarm_worker_token: "{{ swarm_token.stdout }}"
+      when: lab_environment == "swarm"
+
+- name: Join Docker Swarm workers
+  hosts: workers
+  become: true
+  tasks:
+    - name: Read current Swarm state
+      ansible.builtin.command: docker info
+      changed_when: false
+      register: swarm_info
+      when: lab_environment == "swarm"
+
+    - name: Join the manager
+      ansible.builtin.command: >-
+        docker swarm join --token
+        {{ hostvars[groups['masters'][0]].swarm_worker_token }}
+        {{ hostvars[groups['masters'][0]].ansible_host }}:2377
+      when: 'lab_environment == "swarm" and "Swarm: active" not in swarm_info.stdout'
+
+- name: Install Kubernetes with K3s server
+  hosts: masters
+  become: true
+  tasks:
+    - name: Download K3s installer
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: "0755"
+      when: lab_environment == "kubernetes"
+
+    - name: Install K3s server
+      ansible.builtin.command: sh /tmp/k3s-install.sh
+      args:
+        creates: /usr/local/bin/k3s
+      environment:
+        INSTALL_K3S_EXEC: server --node-ip {{ ansible_host }} --tls-san {{ hostvars[groups['load_balancer'][0]].ansible_host }}
+      when: lab_environment == "kubernetes"
+
+    - name: Read K3s node token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token
+      when: lab_environment == "kubernetes"
+
+- name: Configure Kubernetes API load balancer
+  hosts: load_balancer
+  become: true
+  tasks:
+    - name: Require a Debian-family guest for HAProxy
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "The HAProxy load balancer VM requires a Debian-family guest."
+
+    - name: Install HAProxy
+      ansible.builtin.apt:
+        name: haproxy
+        state: present
+        update_cache: true
+
+    - name: Configure HAProxy for the Kubernetes API
+      ansible.builtin.template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart HAProxy
+
+    - name: Apply HAProxy configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        state: started
+        enabled: true
+
+    - name: Wait for the Kubernetes API through HAProxy
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:6443/readyz"
+        validate_certs: false
+        status_code: 200
+      register: api_health
+      until: api_health.status == 200
+      retries: 30
+      delay: 5
+
+  handlers:
+    - name: Restart HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        state: restarted
+
+- name: Join Kubernetes workers
+  hosts: workers
+  become: true
+  tasks:
+    - name: Download K3s installer
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: "0755"
+      when: lab_environment == "kubernetes"
+
+    - name: Install K3s agent
+      ansible.builtin.command: sh /tmp/k3s-install.sh
+      args:
+        creates: /usr/local/bin/k3s
+      environment:
+        K3S_URL: "https://{{ hostvars[groups['load_balancer'][0]].ansible_host }}:6443"
+        K3S_TOKEN: "{{ hostvars[groups['masters'][0]].k3s_token.content | b64decode | trim }}"
+      when: lab_environment == "kubernetes"

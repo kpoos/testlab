@@ -1,0 +1,16 @@
+version: 2
+ethernets:
+  ${interface_name}:
+    dhcp4: ${ip == "" ? "true" : "false"}
+%{ if ip != "" ~}
+    addresses: ["${ip}/${prefix}"]
+%{ if gateway != "" ~}
+    routes:
+      - to: default
+        via: "${gateway}"
+%{ endif ~}
+%{ if length(dns_servers) > 0 ~}
+    nameservers:
+      addresses: ${jsonencode(dns_servers)}
+%{ endif ~}
+%{ endif ~}

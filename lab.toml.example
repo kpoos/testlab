@@ -1,0 +1,62 @@
+[lab]
+name = "testlab"
+hypervisor = "libvirt" # libvirt | vsphere | docker
+environment = "kubernetes" # kubernetes | docker | swarm | vm
+
+[access]
+ssh_user = "lab"
+private_key_file = "~/.ssh/id_ed25519"
+public_key_file = "~/.ssh/id_ed25519.pub" # used to bootstrap libvirt guests
+
+[backend]
+# libvirt settings
+uri = "qemu:///system"
+pool = "default"
+network = "default"
+network_interface = "enp1s0"
+network_prefix = 24
+gateway = "192.168.122.1"
+dns_servers = ["1.1.1.1", "8.8.8.8"]
+
+[load_balancer] # Created only when environment = "kubernetes"
+name = "load-balancer"
+hostname = "haproxy"
+ip = "dhcp"
+cpu = 1
+memory_mb = 1024
+disk_gb = 10
+# os_image = "/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img" # defaults to master os_image
+
+# vSphere settings (uncomment/fill when hypervisor = "vsphere")
+# server = "vcenter.example.test"
+# datacenter = "Datacenter"
+# datastore = "datastore1"
+# cluster = "Cluster"
+# network = "VM Network"
+# network_prefix = 24
+# gateway = "192.168.1.1"
+# dns_servers = ["1.1.1.1", "8.8.8.8"]
+
+# Docker settings (optional)
+# docker_host = "unix:///var/run/docker.sock"
+# subnet = "172.28.0.0/16"
+
+[[nodes]]
+name = "control-1"
+hostname = "control-1"
+role = "master"
+ip = "dhcp" # use "dhcp" or an IPv4 address
+cpu = 2
+memory_mb = 4096
+disk_gb = 30
+os_image = "/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"
+
+[[nodes]]
+name = "worker-1"
+hostname = "worker-1"
+role = "worker"
+ip = "dhcp"
+cpu = 2
+memory_mb = 4096
+disk_gb = 30
+os_image = "/var/lib/libvirt/images/ubuntu-24.04-server-cloudimg-amd64.img"
