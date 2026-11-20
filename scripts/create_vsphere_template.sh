@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Configuration - can be overridden via environment variables
-VCENTER_SERVER="${VCENTER_SERVER:-vcenter.lan}"
+VCENTER_SERVER="${VCENTER_SERVER:-vcenter.local}"
 VCENTER_USERNAME="${VCENTER_USERNAME:-administrator@vsphere.local}"
 VCENTER_PASSWORD="${VCENTER_PASSWORD:-}"
 VCENTER_DATACENTER="${VCENTER_DATACENTER:-Datacenter}"
