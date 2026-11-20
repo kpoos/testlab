@@ -249,6 +249,8 @@ def terraform_vars(config: dict[str, Any]) -> dict[str, Any]:
             gateway=backend.get("gateway", ""),
             dns_servers=backend.get("dns_servers", []),
             allow_unverified_ssl=backend.get("allow_unverified_ssl", False),
+            username=backend.get("username", ""),
+            password=backend.get("password", ""),
         )
     else:
         variables.update(

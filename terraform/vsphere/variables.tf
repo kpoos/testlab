@@ -14,7 +14,7 @@ variable "gateway" { type = string }
 variable "dns_servers" { type = list(string) }
 variable "allow_unverified_ssl" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "nodes" {
