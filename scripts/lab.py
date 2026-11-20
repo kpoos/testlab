@@ -250,7 +250,10 @@ def terraform_vars(config: dict[str, Any]) -> dict[str, Any]:
             dns_servers=backend.get("dns_servers", []),
             allow_unverified_ssl=backend.get("allow_unverified_ssl", False),
             username=backend.get("username", ""),
-            password=backend.get("password", ""),
+            password="",  # Will be populated at runtime
+            template_name=backend.get("template_name", "ubuntu-24.04-template"),
+            cloud_image_url=backend.get("cloud_image_url", "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"),
+            cloud_image_checksum=backend.get("cloud_image_checksum", ""),
         )
     else:
         variables.update(
@@ -260,8 +263,8 @@ def terraform_vars(config: dict[str, Any]) -> dict[str, Any]:
     return variables
 
 
-def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-    subprocess.run(command, cwd=cwd, env=env, check=True)
+def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, input_data: str | None = None) -> None:
+    subprocess.run(command, cwd=cwd, env=env, check=True, input=input_data, text=True if input_data else False, stdin=subprocess.DEVNULL)
 
 
 def write_inventory(config: dict[str, Any], inventory: dict[str, Any], path: Path) -> None:
@@ -309,14 +312,63 @@ def provision(config_path: Path, action: str) -> None:
     if not stack.is_dir():
         raise RuntimeError(f"Terraform stack not found: {stack}")
 
+    # Get vSphere password - check environment variable first, then prompt
+    vsphere_password = None
+    if hypervisor == "vsphere":
+        import os
+        import sys
+        import getpass
+        import termios
+        
+        # Check for password in environment variable first (for non-interactive use)
+        vsphere_password = os.environ.get("VSPHERE_PASSWORD")
+        
+        if not vsphere_password:
+            # Read password before any subprocess calls that might consume stdin
+            try:
+                vsphere_password = getpass.getpass("Enter vSphere password: ")
+            except (EOFError, termios.error):
+                # Fallback for non-TTY environments
+                print("Enter vSphere password: ", end="", flush=True)
+                vsphere_password = sys.stdin.readline().rstrip("\n")
+        print(f"DEBUG: Password length: {len(vsphere_password)}")
+
+    # Now run terraform init
     run(["terraform", "init", "-input=false"], cwd=stack)
+    # Disable locking for this session to avoid state lock issues
+    os.environ["TF_LOCK_TIMEOUT"] = "0s"
     with tempfile.NamedTemporaryFile(mode="w", suffix=".tfvars.json", encoding="utf-8") as vars_file:
-        json.dump(terraform_vars(config), vars_file)
+        vars_dict = terraform_vars(config)
+        # Don't include password in vars file - pass it via -var
+        if "password" in vars_dict:
+            del vars_dict["password"]
+        json.dump(vars_dict, vars_file)
         vars_file.flush()
-        terraform_command = ["terraform", action, "-var-file", vars_file.name]
-        if action in {"apply", "destroy"}:
+        
+        if action == "plan":
+            # Just run plan (like terraform plan)
+            terraform_plan_cmd = ["terraform", "plan", "-lock=false", "-var-file", vars_file.name, "-out", "tfplan"]
+            if vsphere_password:
+                terraform_plan_cmd.extend(["-var", f"password={vsphere_password}"])
+            run(terraform_plan_cmd, cwd=stack)
+        elif action == "apply":
+            # Run plan then apply (like terraform apply)
+            terraform_plan_cmd = ["terraform", "plan", "-lock=false", "-var-file", vars_file.name, "-out", "tfplan"]
+            if vsphere_password:
+                terraform_plan_cmd.extend(["-var", f"password={vsphere_password}"])
+            run(terraform_plan_cmd, cwd=stack)
+            
+            terraform_apply_cmd = ["terraform", "apply", "-lock=false", "-input=false"]
+            if vsphere_password:
+                terraform_apply_cmd.extend(["-var", f"password={vsphere_password}"])
+            terraform_apply_cmd.append("tfplan")
+            run(terraform_apply_cmd, cwd=stack)
+        elif action == "destroy":
+            terraform_command = ["terraform", "destroy", "-lock=false", "-var-file", vars_file.name]
+            if vsphere_password:
+                terraform_command.extend(["-var", f"password={vsphere_password}"])
             terraform_command.append("-input=false")
-        run(terraform_command, cwd=stack)
+            run(terraform_command, cwd=stack)
 
     if action != "apply" or hypervisor == "docker" or environment == "vm":
         return
@@ -349,9 +401,62 @@ def provision(config_path: Path, action: str) -> None:
         )
 
 
+def create_vsphere_template(config: dict[str, Any]) -> None:
+    """Create vSphere template from cloud image using govc."""
+    backend = config.get("backend", {})
+    script_path = ROOT / "scripts" / "create_vsphere_template.sh"
+    if not script_path.is_file():
+        raise RuntimeError(f"Template creation script not found: {script_path}")
+
+    import os
+    import sys
+    import getpass
+    import termios
+    
+    # Get vSphere password - check environment variable first, then prompt
+    vsphere_password = os.environ.get("VSPHERE_PASSWORD")
+    
+    if not vsphere_password:
+        # Read password before any subprocess calls that might consume stdin
+        try:
+            vsphere_password = getpass.getpass("Enter vSphere password: ")
+        except (EOFError, termios.error):
+            # Fallback for non-TTY environments
+            print("Enter vSphere password: ", end="", flush=True)
+            vsphere_password = sys.stdin.readline().rstrip("\n")
+    print(f"DEBUG: Password length: {len(vsphere_password)}")
+
+    env = os.environ.copy()
+    env.update({
+        "VCENTER_SERVER": backend.get("server", ""),
+        "VCENTER_USERNAME": backend.get("username", ""),
+        "VCENTER_PASSWORD": vsphere_password,
+        "VCENTER_DATACENTER": backend.get("datacenter", ""),
+        "VCENTER_DATASTORE": backend.get("datastore", ""),
+        "VCENTER_CLUSTER": backend.get("cluster", ""),
+        "VCENTER_NETWORK": backend.get("network", ""),
+        "TEMPLATE_NAME": backend.get("template_name", "ubuntu-24.04-template"),
+        "CLOUD_IMAGE_URL": backend.get("cloud_image_url", "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"),
+        "CLOUD_IMAGE_CHECKSUM": backend.get("cloud_image_checksum", ""),
+        "ALLOW_UNVERIFIED_SSL": str(backend.get("allow_unverified_ssl", True)).lower(),
+    })
+
+    # Check required fields
+    required = ["VCENTER_SERVER", "VCENTER_USERNAME", "VCENTER_PASSWORD", "VCENTER_DATACENTER", "VCENTER_DATASTORE", "VCENTER_CLUSTER", "VCENTER_NETWORK"]
+    missing = [k for k in required if not env[k]]
+    if missing:
+        raise RuntimeError(f"Missing required backend fields for template creation: {', '.join(missing)}")
+
+    if not shutil.which("govc"):
+        raise RuntimeError("govc is not installed. Please install it from https://github.com/vmware/govmomi/releases")
+
+    print("Creating vSphere template...")
+    run(["bash", str(script_path)], env=env)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Terraform + Ansible test lab provisioner")
-    parser.add_argument("action", choices=("validate", "plan", "up", "down"))
+    parser.add_argument("action", choices=("validate", "plan", "apply", "destroy", "create-template"))
     parser.add_argument("-c", "--config", type=Path, default=Path("lab.toml"))
     args = parser.parse_args()
     config_path = args.config.expanduser().resolve()
@@ -360,9 +465,14 @@ def main() -> int:
         if args.action == "validate":
             print(f"Valid configuration: {config_path}")
             return 0
+        if args.action == "create-template":
+            if config["lab"]["hypervisor"] != "vsphere":
+                raise RuntimeError("create-template action is only supported for vSphere hypervisor")
+            create_vsphere_template(config)
+            return 0
         if not shutil.which("terraform"):
             raise RuntimeError("terraform is not installed.")
-        provision(config_path, {"up": "apply", "down": "destroy"}.get(args.action, args.action))
+        provision(config_path, args.action)
     except (ConfigError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

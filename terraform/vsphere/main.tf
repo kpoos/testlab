@@ -17,12 +17,13 @@ data "vsphere_network" "network" {
   datacenter_id = data.vsphere_datacenter.dc.id
 }
 
+# Try to find existing template VM
 data "vsphere_virtual_machine" "template" {
-  for_each      = var.nodes
-  name          = each.value.os_image
+  name          = var.template_name
   datacenter_id = data.vsphere_datacenter.dc.id
 }
 
+# Use the template for all nodes
 resource "vsphere_virtual_machine" "node" {
   for_each = var.nodes
 
@@ -31,22 +32,24 @@ resource "vsphere_virtual_machine" "node" {
   datastore_id     = data.vsphere_datastore.datastore.id
   num_cpus         = each.value.cpu
   memory           = each.value.memory_mb
-  guest_id         = data.vsphere_virtual_machine.template[each.key].guest_id
-  scsi_type        = data.vsphere_virtual_machine.template[each.key].scsi_type
+  guest_id         = data.vsphere_virtual_machine.template.guest_id
+  scsi_type        = data.vsphere_virtual_machine.template.scsi_type
+  firmware         = data.vsphere_virtual_machine.template.firmware
 
   network_interface {
     network_id   = data.vsphere_network.network.id
-    adapter_type = data.vsphere_virtual_machine.template[each.key].network_interface_types[0]
+    adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
   }
 
   disk {
     label            = "disk0"
-    size             = each.value.disk_gb
-    thin_provisioned = true
+    size             = 50
+    thin_provisioned = false
+    eagerly_scrub    = false
   }
 
   clone {
-    template_uuid = data.vsphere_virtual_machine.template[each.key].id
+    template_uuid = data.vsphere_virtual_machine.template.id
     linked_clone  = false
 
     customize {
@@ -67,4 +70,12 @@ resource "vsphere_virtual_machine" "node" {
 
   wait_for_guest_net_timeout = 5
   wait_for_guest_ip_timeout  = 5
+}
+
+# Output template info for reference
+output "template_info" {
+  value = {
+    name = data.vsphere_virtual_machine.template.name
+    id   = data.vsphere_virtual_machine.template.id
+  }
 }

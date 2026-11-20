@@ -17,6 +17,25 @@ variable "allow_unverified_ssl" {
   default = true
 }
 
+# vSphere template configuration
+variable "template_name" {
+  type        = string
+  description = "Name of the vSphere template VM to use for cloning"
+  default     = "ubuntu-24.04-template"
+}
+
+variable "cloud_image_url" {
+  type        = string
+  description = "URL to download the Ubuntu cloud image"
+  default     = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+}
+
+variable "cloud_image_checksum" {
+  type        = string
+  description = "SHA256 checksum of the cloud image"
+  default     = ""
+}
+
 variable "nodes" {
   type = map(object({
     hostname  = string
