@@ -21,7 +21,7 @@ variable "allow_unverified_ssl" {
 variable "template_name" {
   type        = string
   description = "Name of the vSphere template VM to use for cloning"
-  default     = "ubuntu-24.04-template"
+  default     = "Ubuntu-24.04"
 }
 
 variable "cloud_image_url" {

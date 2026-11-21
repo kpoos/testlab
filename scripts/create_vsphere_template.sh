@@ -5,14 +5,14 @@
 set -euo pipefail
 
 # Configuration - can be overridden via environment variables
-VCENTER_SERVER="${VCENTER_SERVER:-vcenter.local}"
+VCENTER_SERVER="${VCENTER_SERVER:-vcenter.lan}"
 VCENTER_USERNAME="${VCENTER_USERNAME:-administrator@vsphere.local}"
 VCENTER_PASSWORD="${VCENTER_PASSWORD:-}"
 VCENTER_DATACENTER="${VCENTER_DATACENTER:-Datacenter}"
 VCENTER_DATASTORE="${VCENTER_DATASTORE:-datastore1}"
 VCENTER_CLUSTER="${VCENTER_CLUSTER:-Cluster}"
 VCENTER_NETWORK="${VCENTER_NETWORK:-VM Network}"
-TEMPLATE_NAME="${TEMPLATE_NAME:-ubuntu-24.04-template}"
+TEMPLATE_NAME="${TEMPLATE_NAME:-Ubuntu-24.04}"
 CLOUD_IMAGE_URL="${CLOUD_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img}"
 CLOUD_IMAGE_CHECKSUM="${CLOUD_IMAGE_CHECKSUM:-}"
 ALLOW_UNVERIFIED_SSL="${ALLOW_UNVERIFIED_SSL:-true}"
@@ -88,22 +88,53 @@ if [[ -n "${CLOUD_IMAGE_CHECKSUM}" ]]; then
     log_info "Checksum verified"
 fi
 
-# Upload image to vSphere datastore
-log_info "Uploading image to datastore ${VCENTER_DATASTORE}..."
-govc datastore.upload "${IMAGE_FILE}" "${TEMPLATE_NAME}/$(basename ${IMAGE_FILE})"
+# Convert qcow2 to VMDK (required for vSphere)
+VMDK_FILE="/tmp/${TEMPLATE_NAME}.vmdk"
+log_info "Converting qcow2 to VMDK..."
+if command -v qemu-img &> /dev/null; then
+    qemu-img convert -f qcow2 -O vmdk -o subformat=streamOptimized "${IMAGE_FILE}" "${VMDK_FILE}"
+else
+    log_error "qemu-img not found. Please install qemu-utils to convert the image."
+    exit 1
+fi
 
-# Create VM from uploaded image
-log_info "Creating VM ${TEMPLATE_NAME}..."
+# Upload VMDK to vSphere datastore with a temporary name to avoid locking issues
+UPLOAD_PATH="${TEMPLATE_NAME}/${TEMPLATE_NAME}-upload.vmdk"
+log_info "Uploading VMDK to datastore ${VCENTER_DATASTORE}..."
+govc datastore.upload "${VMDK_FILE}" "${UPLOAD_PATH}"
+
+# Copy the uploaded VMDK to release the lock (govc upload leaves file locked)
+FINAL_VMDK_PATH="${TEMPLATE_NAME}/${TEMPLATE_NAME}.vmdk"
+log_info "Copying VMDK to release lock..."
+govc datastore.cp "${UPLOAD_PATH}" "${FINAL_VMDK_PATH}"
+
+# Remove the temporary upload file
+govc datastore.rm "${UPLOAD_PATH}"
+
+# Create VM with a small blank disk first
+log_info "Creating VM ${TEMPLATE_NAME} with blank disk..."
 govc vm.create \
     -on=false \
     -m=2048 \
     -c=2 \
     -g=ubuntu64Guest \
-    -disk="${TEMPLATE_NAME}/$(basename ${IMAGE_FILE})" \
+    -disk=10GB \
     -disk.controller=scsi \
     -net="${VCENTER_NETWORK}" \
     -net.adapter=vmxnet3 \
     "${TEMPLATE_NAME}"
+
+# Remove the blank disk
+log_info "Removing blank disk..."
+govc vm.disk.remove -vm "${TEMPLATE_NAME}" -disk.name "disk-1000-0" || true
+
+# Attach the uploaded VMDK as the primary disk
+log_info "Attaching uploaded VMDK..."
+govc vm.disk.attach -vm "${TEMPLATE_NAME}" -disk "${FINAL_VMDK_PATH}" -controller scsi -unit 0
+
+# Add CD-ROM for cloud-init
+log_info "Adding CD-ROM for cloud-init..."
+govc device.cdrom.add -vm "${TEMPLATE_NAME}" -device cdrom-3000
 
 # Configure VM for cloud-init
 log_info "Configuring VM for cloud-init..."
@@ -112,6 +143,10 @@ govc vm.change \
     -e="guestinfo.metadata.encoding=gzip+base64" \
     -e="guestinfo.userdata.encoding=gzip+base64" \
     "${TEMPLATE_NAME}"
+
+# Set firmware to EFI (required for modern Ubuntu)
+log_info "Setting firmware to EFI..."
+govc vm.change -e="firmware=efi" "${TEMPLATE_NAME}"
 
 # Convert to template
 log_info "Converting VM to template..."

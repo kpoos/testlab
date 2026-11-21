@@ -5,6 +5,10 @@ terraform {
       source  = "vmware/vsphere"
       version = "~> 2.8"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
   }
 }
 
@@ -14,3 +18,5 @@ provider "vsphere" {
   password             = var.password
   allow_unverified_ssl = var.allow_unverified_ssl
 }
+
+provider "external" {}
