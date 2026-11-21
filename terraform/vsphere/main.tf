@@ -39,11 +39,12 @@ resource "vsphere_virtual_machine" "node" {
   network_interface {
     network_id   = data.vsphere_network.network.id
     adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
+    mac_address  = ""
   }
 
   disk {
     label            = "disk0"
-    size             = each.value.disk_gb
+    size             = max(each.value.disk_gb, 50)
     thin_provisioned = true
     eagerly_scrub    = false
   }
@@ -58,21 +59,15 @@ resource "vsphere_virtual_machine" "node" {
         domain    = "local"
       }
 
-      # Only configure static network if IP is provided; otherwise use DHCP
-      dynamic "network_interface" {
-        for_each = each.value.ip != "" ? [each.value] : []
-        content {
-          ipv4_address = each.value.ip
-          ipv4_netmask = var.network_prefix
-        }
+      # Always provide network_interface block to match VM's network adapter count
+      # For DHCP, omit ipv4_address and ipv4_netmask
+      network_interface {
+        ipv4_address = each.value.ip != "" ? each.value.ip : null
+        ipv4_netmask = each.value.ip != "" ? var.network_prefix : null
       }
 
-      dynamic "ipv4_gateway" {
-        for_each = each.value.ip != "" ? [var.gateway] : []
-        content {
-          value = var.gateway
-        }
-      }
+      # Gateway is only set when using static IP
+      ipv4_gateway = each.value.ip != "" ? var.gateway : null
 
       dns_server_list = var.dns_servers
     }
