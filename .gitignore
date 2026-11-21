@@ -5,6 +5,7 @@ lab.toml
 .terraform/
 *.tfstate
 *.tfstate.*
+tfplan
 crash.log
 
 # Python
