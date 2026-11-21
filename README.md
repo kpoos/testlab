@@ -28,11 +28,11 @@ cp lab.toml.example lab.toml
 # Edit the backend and node settings in lab.toml.
 python3 scripts/lab.py validate -c lab.toml
 python3 scripts/lab.py plan -c lab.toml
-python3 scripts/lab.py up -c lab.toml
-python3 scripts/lab.py down -c lab.toml
+python3 scripts/lab.py apply -c lab.toml
+python3 scripts/lab.py destroy -c lab.toml
 ```
 
-`up` applies the Terraform configuration and then runs the Ansible playbook, except when using the Docker backend or the `vm` environment. If configuration is interrupted, run `up` again to continue. `down` destroys machines and containers managed by Terraform.
+`apply` applies the Terraform configuration and then runs the Ansible playbook, except when using the Docker backend or the `vm` environment. If configuration is interrupted, run `apply` again to continue. `destroy` destroys machines and containers managed by Terraform.
 
 ### Configuration
 
