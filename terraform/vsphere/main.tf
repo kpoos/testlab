@@ -43,8 +43,8 @@ resource "vsphere_virtual_machine" "node" {
 
   disk {
     label            = "disk0"
-    size             = 50
-    thin_provisioned = false
+    size             = each.value.disk_gb
+    thin_provisioned = true
     eagerly_scrub    = false
   }
 
@@ -58,18 +58,28 @@ resource "vsphere_virtual_machine" "node" {
         domain    = "local"
       }
 
-      network_interface {
-        ipv4_address = each.value.ip != "" ? each.value.ip : "0.0.0.0"
-        ipv4_netmask = each.value.ip != "" ? var.network_prefix : 0
+      # Only configure static network if IP is provided; otherwise use DHCP
+      dynamic "network_interface" {
+        for_each = each.value.ip != "" ? [each.value] : []
+        content {
+          ipv4_address = each.value.ip
+          ipv4_netmask = var.network_prefix
+        }
       }
 
-      ipv4_gateway    = each.value.ip != "" ? var.gateway : null
+      dynamic "ipv4_gateway" {
+        for_each = each.value.ip != "" ? [var.gateway] : []
+        content {
+          value = var.gateway
+        }
+      }
+
       dns_server_list = var.dns_servers
     }
   }
 
-  wait_for_guest_net_timeout = 5
-  wait_for_guest_ip_timeout  = 5
+  wait_for_guest_net_timeout = 300
+  wait_for_guest_ip_timeout  = 300
 }
 
 # Output template info for reference

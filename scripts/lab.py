@@ -339,40 +339,27 @@ def provision(config_path: Path, action: str) -> None:
     os.environ["TF_LOCK_TIMEOUT"] = "0s"
     with tempfile.NamedTemporaryFile(mode="w", suffix=".tfvars.json", encoding="utf-8") as vars_file:
         vars_dict = terraform_vars(config)
-        # Don't include password in vars file - pass it via -var
-        if "password" in vars_dict:
-            del vars_dict["password"]
+        # Include password in vars file so it's captured in the plan
+        if vsphere_password:
+            vars_dict["password"] = vsphere_password
         json.dump(vars_dict, vars_file)
         vars_file.flush()
         
         if action == "plan":
             # Just run plan (like terraform plan)
             terraform_plan_cmd = ["terraform", "plan", "-lock=false", "-var-file", vars_file.name, "-out", "tfplan"]
-            if vsphere_password:
-                terraform_plan_cmd.extend(["-var", f"password={vsphere_password}"])
             run(terraform_plan_cmd, cwd=stack)
         elif action == "apply":
             # Run plan then apply (like terraform apply)
             terraform_plan_cmd = ["terraform", "plan", "-lock=false", "-var-file", vars_file.name, "-out", "tfplan"]
-            if vsphere_password:
-                terraform_plan_cmd.extend(["-var", f"password={vsphere_password}"])
             run(terraform_plan_cmd, cwd=stack)
             
-            terraform_apply_cmd = ["terraform", "apply", "-lock=false", "-input=false"]
-            if vsphere_password:
-                terraform_apply_cmd.extend(["-var", f"password={vsphere_password}"])
-            terraform_apply_cmd.append("tfplan")
+            # Apply saved plan - no additional variables allowed
+            terraform_apply_cmd = ["terraform", "apply", "-lock=false", "-input=false", "tfplan"]
             run(terraform_apply_cmd, cwd=stack)
         elif action == "destroy":
-            terraform_command = ["terraform", "destroy", "-lock=false", "-var-file", vars_file.name]
-            if vsphere_password:
-                terraform_command.extend(["-var", f"password={vsphere_password}"])
-            terraform_command.append("-input=false")
+            terraform_command = ["terraform", "destroy", "-lock=false", "-var-file", vars_file.name, "-auto-approve"]
             run(terraform_command, cwd=stack)
-
-    if action != "apply" or hypervisor == "docker" or environment == "vm":
-        return
-
     output = subprocess.run(
         ["terraform", "output", "-json", "node_inventory"],
         cwd=stack,
