@@ -39,9 +39,9 @@ resource "vsphere_virtual_machine" "node" {
   network_interface {
     network_id   = data.vsphere_network.network.id
     adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
-    # Do not set a static MAC address; let vSphere generate a unique MAC per clone.
-    # Setting mac_address = "" causes all clones to share the same MAC, resulting
-    # in duplicate DHCP IP addresses.
+    # Generate a unique MAC address per clone so DHCP assigns distinct IPs.
+    # All clones inherit the template's MAC by default, causing duplicate IPs.
+    mac_address = "02:50:56:${format("%02x", index(keys(var.nodes), each.key) + 1)}:${format("%02x", index(keys(var.nodes), each.key) + 1)}:${format("%02x", index(keys(var.nodes), each.key) + 1)}"
   }
 
   disk {
@@ -49,6 +49,12 @@ resource "vsphere_virtual_machine" "node" {
     size             = max(each.value.disk_gb, 50)
     thin_provisioned = true
     eagerly_scrub    = false
+  }
+
+  # CD-ROM required for VMware Guest Customization (customize block delivers
+  # vApp properties via a virtual CD-ROM device).
+  cdrom {
+    client_device = true
   }
 
   clone {

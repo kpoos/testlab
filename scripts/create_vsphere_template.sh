@@ -172,10 +172,6 @@ if [[ "${IMPORT_SUCCESS}" != "true" ]]; then
     exit 1
 fi
 
-# Add CD-ROM for cloud-init
-log_info "Adding CD-ROM for cloud-init..."
-govc device.cdrom.add -vm "${TEMPLATE_NAME}" -device cdrom-3000
-
 # Configure VM for cloud-init
 log_info "Configuring VM for cloud-init..."
 
