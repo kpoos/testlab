@@ -179,21 +179,38 @@ govc device.cdrom.add -vm "${TEMPLATE_NAME}" -device cdrom-3000
 # Configure VM for cloud-init
 log_info "Configuring VM for cloud-init..."
 
-# Generate cloud-init userdata that sets the default ubuntu password
+# Determine SSH public key to inject (matches lab.toml [access] private_key_file)
+SSH_PUB_KEY_FILE="${SSH_PUBLIC_KEY_FILE:-~/.ssh/id_ed25519.pub}"
+SSH_PUB_KEY_FILE="${SSH_PUB_KEY_FILE/#\~/$HOME}"
+SSH_PUBLIC_KEY=""
+if [[ -f "${SSH_PUB_KEY_FILE}" ]]; then
+    SSH_PUBLIC_KEY=$(cat "${SSH_PUB_KEY_FILE}")
+    log_info "SSH public key found: ${SSH_PUB_KEY_FILE}"
+else
+    log_warn "SSH public key not found at ${SSH_PUB_KEY_FILE}; password-only auth will be used"
+fi
+
+# Generate cloud-init userdata that sets up the lab user (matching ssh_user in lab.toml)
 USERDATA_FILE="/tmp/${TEMPLATE_NAME}-userdata"
-cat > "${USERDATA_FILE}" <<'EOF'
+if [[ -n "${SSH_PUBLIC_KEY}" ]]; then
+    cat > "${USERDATA_FILE}" <<EOF
 #cloud-config
 chpasswd:
   list: |
     ubuntu:ubuntu
+    lab:lab
   expire: false
 users:
   - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
+  - name: lab
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
 ssh_pwauth: true
 disable_root: false
-ssh_authorized_keys: []
 write_files:
   - path: /etc/ssh/sshd_config.d/99-cloud-init-password-auth.conf
     content: |
@@ -203,6 +220,33 @@ write_files:
 runcmd:
   - systemctl restart sshd || service sshd restart || true
 EOF
+else
+    cat > "${USERDATA_FILE}" <<'EOF'
+#cloud-config
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+    lab:lab
+  expire: false
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+  - name: lab
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+ssh_pwauth: true
+disable_root: false
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-cloud-init-password-auth.conf
+    content: |
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication yes
+    permissions: '0644'
+runcmd:
+  - systemctl restart sshd || service sshd restart || true
+EOF
+fi
 
 # Generate cloud-init metadata (required for cloud-init to trigger)
 METADATA_FILE="/tmp/${TEMPLATE_NAME}-metadata"
