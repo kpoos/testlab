@@ -39,7 +39,9 @@ resource "vsphere_virtual_machine" "node" {
   network_interface {
     network_id   = data.vsphere_network.network.id
     adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
-    mac_address  = ""
+    # Do not set a static MAC address; let vSphere generate a unique MAC per clone.
+    # Setting mac_address = "" causes all clones to share the same MAC, resulting
+    # in duplicate DHCP IP addresses.
   }
 
   disk {

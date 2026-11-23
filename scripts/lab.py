@@ -270,6 +270,7 @@ def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | No
 def write_inventory(config: dict[str, Any], inventory: dict[str, Any], path: Path) -> None:
     masters: list[str] = []
     workers: list[str] = []
+    load_balancers: list[str] = []
     hosts: list[str] = []
     for name, details in inventory.items():
         address = details.get("ip", "")
