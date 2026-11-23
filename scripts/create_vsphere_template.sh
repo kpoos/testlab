@@ -183,25 +183,74 @@ log_info "Configuring VM for cloud-init..."
 USERDATA_FILE="/tmp/${TEMPLATE_NAME}-userdata"
 cat > "${USERDATA_FILE}" <<'EOF'
 #cloud-config
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+  expire: false
 users:
   - name: ubuntu
-    passwd: $6$rounds=4096$randomsalt$hashedpasswordplaceholder
-    lock_passwd: false
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
 ssh_pwauth: true
 disable_root: false
+ssh_authorized_keys: []
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-cloud-init-password-auth.conf
+    content: |
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication yes
+    permissions: '0644'
+runcmd:
+  - systemctl restart sshd || service sshd restart || true
 EOF
 
-# Encode userdata as gzip+base64 for guestinfo
+# Generate cloud-init metadata (required for cloud-init to trigger)
+METADATA_FILE="/tmp/${TEMPLATE_NAME}-metadata"
+cat > "${METADATA_FILE}" <<EOF
+instance-id: ${TEMPLATE_NAME}
+local-hostname: ${TEMPLATE_NAME}
+EOF
+
+# Encode userdata and metadata as gzip+base64 for guestinfo
 USERDATA_B64=$(gzip -c "${USERDATA_FILE}" | base64 -w0)
+METADATA_B64=$(gzip -c "${METADATA_FILE}" | base64 -w0)
 
 govc vm.change \
     -e="disk.EnableUUID=TRUE" \
     -e="guestinfo.metadata.encoding=gzip+base64" \
+    -e="guestinfo.metadata=${METADATA_B64}" \
     -e="guestinfo.userdata.encoding=gzip+base64" \
     -e="guestinfo.userdata=${USERDATA_B64}" \
     "${TEMPLATE_NAME}"
+
+# Power on the VM so cloud-init can run on first boot
+log_info "Powering on VM ${TEMPLATE_NAME} for cloud-init..."
+govc vm.power -on "${TEMPLATE_NAME}"
+
+# Wait for VM to get an IP (cloud-init needs network to complete)
+log_info "Waiting for VM to obtain an IP address..."
+VM_IP=""
+for i in $(seq 1 60); do
+    VM_IP=$(govc vm.ip "${TEMPLATE_NAME}" 2>/dev/null | head -1 || true)
+    if [[ -n "${VM_IP}" ]]; then
+        break
+    fi
+    sleep 5
+done
+
+if [[ -z "${VM_IP}" ]]; then
+    log_warn "VM did not obtain an IP address; proceeding anyway."
+else
+    log_info "VM IP: ${VM_IP}"
+fi
+
+# Give cloud-init time to complete
+log_info "Waiting for cloud-init to complete..."
+sleep 30
+
+# Power off before converting to template
+log_info "Powering off VM ${TEMPLATE_NAME}..."
+govc vm.power -off "${TEMPLATE_NAME}" || true
 
 # Set firmware to EFI (required for modern Ubuntu)
 log_info "Setting firmware to EFI..."
