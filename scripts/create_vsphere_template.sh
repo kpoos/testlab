@@ -13,6 +13,7 @@ VCENTER_DATASTORE="${VCENTER_DATASTORE:-datastore1}"
 VCENTER_CLUSTER="${VCENTER_CLUSTER:-Cluster}"
 VCENTER_NETWORK="${VCENTER_NETWORK:-VM Network}"
 TEMPLATE_NAME="${TEMPLATE_NAME:-Ubuntu-24.04}"
+FORCE="${FORCE:-false}"
 CLOUD_IMAGE_URL="${CLOUD_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img}"
 CLOUD_IMAGE_CHECKSUM="${CLOUD_IMAGE_CHECKSUM:-}"
 ALLOW_UNVERIFIED_SSL="${ALLOW_UNVERIFIED_SSL:-true}"
@@ -62,10 +63,61 @@ fi
 log_info "Connected to vCenter successfully"
 
 # Check if template already exists
-if govc vm.info "${TEMPLATE_NAME}" &> /dev/null; then
-    log_warn "Template '${TEMPLATE_NAME}' already exists. Skipping creation."
-    log_info "To recreate, delete the existing template first: govc vm.destroy ${TEMPLATE_NAME}"
-    exit 0
+TEMPLATE_INFO=$(timeout 30 govc vm.info "${TEMPLATE_NAME}" 2>/dev/null) || true
+if [[ -n "${TEMPLATE_INFO}" && "${TEMPLATE_INFO}" == *"Name: ${TEMPLATE_NAME}"* ]]; then
+    if [[ "${FORCE}" == "true" ]]; then
+        log_warn "Template '${TEMPLATE_NAME}' already exists. FORCE=true, deleting and recreating..."
+        # govc vm.destroy doesn't work on templates. Use govc object.destroy with the
+        # managed object reference (MoRef) from govc vm.info -json instead.
+        DESTROYED=false
+
+        # Try 1: Destroy by MoRef (most reliable for templates)
+        TEMPLATE_MOREF=$(echo "${TEMPLATE_INFO}" | grep -o '"Obj": *"[^"]*"' | head -1 | sed 's/.*"Obj": *"//;s/"$//')
+        if [[ -z "${TEMPLATE_MOREF}" ]]; then
+            TEMPLATE_MOREF=$(timeout 30 govc vm.info -json "${TEMPLATE_NAME}" 2>/dev/null \
+                | grep -o '"Obj": *"[^"]*"' | head -1 | sed 's/.*"Obj": *"//;s/"$//')
+        fi
+        if [[ -n "${TEMPLATE_MOREF}" ]]; then
+            log_info "Found template MoRef ${TEMPLATE_MOREF}, destroying..."
+            if timeout 120 govc object.destroy -force "${TEMPLATE_MOREF}"; then
+                DESTROYED=true
+            fi
+        fi
+
+        # Try 2: Destroy by inventory path
+        if [[ "${DESTROYED}" != "true" ]]; then
+            TEMPLATE_PATH=$(echo "${TEMPLATE_INFO}" | sed -n 's/^[Pp]ath:[[:space:]]*//p' | head -1 | tr -d '[:space:]')
+            if [[ -z "${TEMPLATE_PATH}" ]]; then
+                TEMPLATE_PATH=$(timeout 30 govc vm.info "${TEMPLATE_NAME}" 2>/dev/null \
+                    | sed -n 's/^[Pp]ath:[[:space:]]*//p' | head -1 | tr -d '[:space:]')
+            fi
+            if [[ -n "${TEMPLATE_PATH}" ]]; then
+                log_info "Found template at ${TEMPLATE_PATH}, destroying..."
+                if timeout 120 govc object.destroy -force "${TEMPLATE_PATH}"; then
+                    DESTROYED=true
+                fi
+            fi
+        fi
+
+        # Try 3: govc vm.destroy as last resort
+        if [[ "${DESTROYED}" != "true" ]]; then
+            log_warn "Trying govc vm.destroy as fallback..."
+            if timeout 120 govc vm.destroy "${TEMPLATE_NAME}"; then
+                DESTROYED=true
+            fi
+        fi
+
+        if [[ "${DESTROYED}" != "true" ]]; then
+            log_error "Failed to delete existing template '${TEMPLATE_NAME}'"
+            log_info "Please delete it manually and re-run the script."
+            exit 1
+        fi
+        log_info "Deleted existing template '${TEMPLATE_NAME}'"
+    else
+        log_warn "Template '${TEMPLATE_NAME}' already exists. Skipping creation."
+        log_info "To recreate, set FORCE=true or delete the existing template first: govc vm.destroy ${TEMPLATE_NAME}"
+        exit 0
+    fi
 fi
 
 # Download cloud image
