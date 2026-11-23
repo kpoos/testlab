@@ -67,17 +67,11 @@ resource "vsphere_virtual_machine" "node" {
         domain    = "local"
       }
 
-      # Always provide network_interface block to match VM's network adapter count
-      # For DHCP, omit ipv4_address and ipv4_netmask
+      # DHCP network settings for guest customization
       network_interface {
-        ipv4_address = each.value.ip != "" ? each.value.ip : null
-        ipv4_netmask = each.value.ip != "" ? var.network_prefix : null
+        ipv4_address = null
+        ipv4_netmask = null
       }
-
-      # Gateway is only set when using static IP
-      ipv4_gateway = each.value.ip != "" ? var.gateway : null
-
-      dns_server_list = var.dns_servers
     }
   }
 

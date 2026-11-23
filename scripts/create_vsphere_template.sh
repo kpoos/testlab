@@ -214,6 +214,7 @@ write_files:
       KbdInteractiveAuthentication yes
     permissions: '0644'
 runcmd:
+  - apt-get update && apt-get install -y open-vm-tools
   - systemctl restart sshd || service sshd restart || true
 EOF
 else
@@ -240,6 +241,7 @@ write_files:
       KbdInteractiveAuthentication yes
     permissions: '0644'
 runcmd:
+  - apt-get update && apt-get install -y open-vm-tools
   - systemctl restart sshd || service sshd restart || true
 EOF
 fi
@@ -284,9 +286,9 @@ else
     log_info "VM IP: ${VM_IP}"
 fi
 
-# Give cloud-init time to complete
-log_info "Waiting for cloud-init to complete..."
-sleep 30
+# Give cloud-init time to complete (apt-get install open-vm-tools takes 1-2 minutes)
+log_info "Waiting for cloud-init to complete (up to 3 minutes)..."
+sleep 180
 
 # Power off before converting to template
 log_info "Powering off VM ${TEMPLATE_NAME}..."
