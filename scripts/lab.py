@@ -424,7 +424,7 @@ def create_vsphere_template(config: dict[str, Any]) -> None:
         "VCENTER_CLUSTER": backend.get("cluster", ""),
         "VCENTER_NETWORK": backend.get("network", ""),
         "TEMPLATE_NAME": backend.get("template_name", "Ubuntu-24.04"),
-        "CLOUD_IMAGE_URL": backend.get("cloud_image_url", "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"),
+        "CLOUD_IMAGE_URL": backend.get("cloud_image_url", "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.ova"),
         "CLOUD_IMAGE_CHECKSUM": backend.get("cloud_image_checksum", ""),
         "ALLOW_UNVERIFIED_SSL": str(backend.get("allow_unverified_ssl", True)).lower(),
     })

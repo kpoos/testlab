@@ -39,9 +39,8 @@ resource "vsphere_virtual_machine" "node" {
   network_interface {
     network_id   = data.vsphere_network.network.id
     adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
-    # Generate a unique MAC address per clone so DHCP assigns distinct IPs.
-    # All clones inherit the template's MAC by default, causing duplicate IPs.
-    mac_address = "02:50:56:${format("%02x", index(keys(var.nodes), each.key) + 1)}:${format("%02x", index(keys(var.nodes), each.key) + 1)}:${format("%02x", index(keys(var.nodes), each.key) + 1)}"
+    # Let vSphere auto-generate a unique MAC per clone during cloning.
+    # Setting mac_address explicitly can cause the adapter to appear disconnected.
   }
 
   disk {
