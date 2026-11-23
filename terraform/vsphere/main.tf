@@ -39,8 +39,10 @@ resource "vsphere_virtual_machine" "node" {
   network_interface {
     network_id   = data.vsphere_network.network.id
     adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
-    # Let vSphere auto-generate a unique MAC per clone during cloning.
-    # Setting mac_address explicitly can cause the adapter to appear disconnected.
+    # NIC connection state is inherited from the template; the template script
+    # explicitly connects the adapter before markastemplate so clones come up
+    # connected. Do not set mac_address here — vSphere assigns a unique MAC
+    # per clone during cloning.
   }
 
   disk {
@@ -59,19 +61,26 @@ resource "vsphere_virtual_machine" "node" {
   clone {
     template_uuid = data.vsphere_virtual_machine.template.id
     linked_clone  = false
+    # No customize{} block: VMware Guest Customization (vmware-imc) fails on
+    # Ubuntu cloud images. Hostname and network are delivered per-clone via
+    # cloud-init guestinfo (see extra_config below).
+  }
 
-    customize {
-      linux_options {
-        host_name = each.value.hostname
-        domain    = "local"
-      }
-
-      # DHCP network settings for guest customization
-      network_interface {
-        ipv4_address = null
-        ipv4_netmask = null
-      }
-    }
+  # Per-clone cloud-init config: hostname + DHCP. cloud-init reads these
+  # guestinfo keys on boot (VMware datasource), replacing Guest Customization.
+  extra_config = {
+    "guestinfo.metadata" = base64gzip(jsonencode({
+      instance-id    = "${var.lab_name}-${each.value.hostname}"
+      local-hostname = each.value.hostname
+    }))
+    "guestinfo.metadata.encoding" = "gzip+base64"
+    "guestinfo.userdata" = base64gzip(<<-EOT
+      #cloud-config
+      hostname: ${each.value.hostname}
+      manage_etc_hosts: true
+      EOT
+    )
+    "guestinfo.userdata.encoding" = "gzip+base64"
   }
 
   wait_for_guest_net_timeout = 300

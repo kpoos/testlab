@@ -267,6 +267,78 @@ def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | No
     subprocess.run(command, cwd=cwd, env=env, check=True, input=input_data, text=True if input_data else False, stdin=subprocess.DEVNULL)
 
 
+def wait_for_ssh(inventory: dict[str, Any], private_key: Path, ssh_user: str, timeout: int = 300) -> None:
+    """Clear stale known_hosts entries and wait until every node accepts SSH key auth.
+
+    Recreated VMs get new host keys (stale entries cause 'REMOTE HOST IDENTIFICATION
+    HAS CHANGED') and clones are still booting/cloud-init is regenerating host keys
+    right after terraform apply (causing 'Connection closed by port 22').
+    """
+    import socket
+    import time
+
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    for name, details in inventory.items():
+        address = details.get("ip", "")
+        if not address:
+            continue
+        # Remove stale host key for this IP (VM was recreated with a new key)
+        if known_hosts.is_file():
+            subprocess.run(
+                ["ssh-keygen", "-f", str(known_hosts), "-R", address],
+                check=False, capture_output=True,
+            )
+
+    deadline = time.time() + timeout
+    pending = {n: d["ip"] for n, d in inventory.items() if d.get("ip")}
+    attempt = 0
+    while pending and time.time() < deadline:
+        attempt += 1
+        for name in list(pending):
+            address = pending[name]
+            # First: TCP reachability (sshd listening)
+            try:
+                with socket.create_connection((address, 22), timeout=5):
+                    pass
+            except OSError as exc:
+                print(f"  [{attempt}] {name} ({address}): port 22 unreachable ({exc})", flush=True)
+                continue
+            # Then: actual key auth (host key regenerated + sshd fully up)
+            try:
+                result = subprocess.run(
+                    [
+                        "ssh",
+                        "-i", str(private_key),
+                        "-o", "StrictHostKeyChecking=no",
+                        "-o", "UserKnownHostsFile=/dev/null",
+                        "-o", "ConnectTimeout=5",
+                        "-o", "BatchMode=yes",
+                        "-o", "LogLevel=ERROR",
+                        f"{ssh_user}@{address}",
+                        "echo ok",
+                    ],
+                    capture_output=True, text=True, timeout=20,
+                )
+            except subprocess.TimeoutExpired:
+                print(f"  [{attempt}] {name} ({address}): SSH auth timed out", flush=True)
+                continue
+            if result.returncode == 0 and "ok" in result.stdout:
+                print(f"SSH ready: {name} ({address})", flush=True)
+                del pending[name]
+            else:
+                err = (result.stderr or result.stdout or "").strip().splitlines()
+                err = err[-1] if err else f"exit {result.returncode}"
+                print(f"  [{attempt}] {name} ({address}): SSH auth failed - {err}", flush=True)
+        if pending:
+            time.sleep(5)
+    if pending:
+        raise RuntimeError(
+            "SSH did not become ready within "
+            f"{timeout}s for: {', '.join(pending)}. "
+            "Check the VMs in vSphere (cloud-init may have failed)."
+        )
+
+
 def write_inventory(config: dict[str, Any], inventory: dict[str, Any], path: Path) -> None:
     masters: list[str] = []
     workers: list[str] = []
@@ -373,6 +445,9 @@ def provision(config_path: Path, action: str) -> None:
     if not ansible:
         raise RuntimeError("ansible-playbook is not installed; VMs were created, but environment configuration was skipped.")
     private_key = Path(config.get("access", {}).get("private_key_file", "~/.ssh/id_ed25519")).expanduser()
+    ssh_user = config.get("access", {}).get("ssh_user", "lab")
+    print("Waiting for SSH on all nodes (clearing stale host keys)...", flush=True)
+    wait_for_ssh(inventory_data, private_key, ssh_user)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".ini", encoding="utf-8") as inventory_file:
         write_inventory(config, inventory_data, Path(inventory_file.name))
         run(
@@ -383,6 +458,10 @@ def provision(config_path: Path, action: str) -> None:
                 inventory_file.name,
                 "--private-key",
                 str(private_key),
+                # Stale host keys were cleared by wait_for_ssh; accept new ones
+                # non-interactively instead of prompting.
+                "--ssh-common-args",
+                "-o StrictHostKeyChecking=accept-new",
                 "-e",
                 f"lab_environment={environment}",
             ]
