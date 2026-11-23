@@ -14,7 +14,7 @@ VCENTER_CLUSTER="${VCENTER_CLUSTER:-Cluster}"
 VCENTER_NETWORK="${VCENTER_NETWORK:-VM Network}"
 TEMPLATE_NAME="${TEMPLATE_NAME:-Ubuntu-24.04}"
 FORCE="${FORCE:-false}"
-CLOUD_IMAGE_URL="${CLOUD_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img}"
+CLOUD_IMAGE_URL="${CLOUD_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.ova}"
 CLOUD_IMAGE_CHECKSUM="${CLOUD_IMAGE_CHECKSUM:-}"
 ALLOW_UNVERIFIED_SSL="${ALLOW_UNVERIFIED_SSL:-true}"
 
@@ -123,11 +123,18 @@ fi
 # Download cloud image
 IMAGE_FILE="/tmp/$(basename ${CLOUD_IMAGE_URL})"
 log_info "Downloading cloud image from ${CLOUD_IMAGE_URL}..."
-if [[ ! -f "${IMAGE_FILE}" ]]; then
+if [[ ! -f "${IMAGE_FILE}" || ! -s "${IMAGE_FILE}" ]]; then
     curl -L -o "${IMAGE_FILE}" "${CLOUD_IMAGE_URL}"
 else
     log_info "Image already downloaded: ${IMAGE_FILE}"
 fi
+
+# Validate the downloaded file is non-empty
+if [[ ! -s "${IMAGE_FILE}" ]]; then
+    log_error "Downloaded image is empty or missing: ${IMAGE_FILE}"
+    exit 1
+fi
+log_info "Image ready: ${IMAGE_FILE} ($(du -h "${IMAGE_FILE}" | awk '{print $1}'))"
 
 # Verify checksum if provided
 if [[ -n "${CLOUD_IMAGE_CHECKSUM}" ]]; then
@@ -140,49 +147,30 @@ if [[ -n "${CLOUD_IMAGE_CHECKSUM}" ]]; then
     log_info "Checksum verified"
 fi
 
-# Convert qcow2 to VMDK (required for vSphere)
-VMDK_FILE="/tmp/${TEMPLATE_NAME}.vmdk"
-log_info "Converting qcow2 to VMDK..."
-if command -v qemu-img &> /dev/null; then
-    qemu-img convert -f qcow2 -O vmdk -o subformat=streamOptimized "${IMAGE_FILE}" "${VMDK_FILE}"
-else
-    log_error "qemu-img not found. Please install qemu-utils to convert the image."
+# Import OVA directly into vSphere (no qemu-img conversion needed)
+# Retry up to 3 times on transient network failures (e.g. "unexpected EOF")
+log_info "Importing OVA into vSphere..."
+IMPORT_ATTEMPTS=0
+IMPORT_SUCCESS=false
+while [[ ${IMPORT_ATTEMPTS} -lt 3 ]]; do
+    IMPORT_ATTEMPTS=$((IMPORT_ATTEMPTS + 1))
+    log_info "Import attempt ${IMPORT_ATTEMPTS}/3..."
+    if govc import.ova -ds="${VCENTER_DATASTORE}" -name="${TEMPLATE_NAME}" "${IMAGE_FILE}"; then
+        IMPORT_SUCCESS=true
+        break
+    else
+        log_warn "Import attempt ${IMPORT_ATTEMPTS} failed."
+        if [[ ${IMPORT_ATTEMPTS} -lt 3 ]]; then
+            log_info "Retrying in 10 seconds..."
+            sleep 10
+        fi
+    fi
+done
+
+if [[ "${IMPORT_SUCCESS}" != "true" ]]; then
+    log_error "Failed to import OVA after 3 attempts."
     exit 1
 fi
-
-# Upload VMDK to vSphere datastore with a temporary name to avoid locking issues
-UPLOAD_PATH="${TEMPLATE_NAME}/${TEMPLATE_NAME}-upload.vmdk"
-log_info "Uploading VMDK to datastore ${VCENTER_DATASTORE}..."
-govc datastore.upload "${VMDK_FILE}" "${UPLOAD_PATH}"
-
-# Copy the uploaded VMDK to release the lock (govc upload leaves file locked)
-FINAL_VMDK_PATH="${TEMPLATE_NAME}/${TEMPLATE_NAME}.vmdk"
-log_info "Copying VMDK to release lock..."
-govc datastore.cp "${UPLOAD_PATH}" "${FINAL_VMDK_PATH}"
-
-# Remove the temporary upload file
-govc datastore.rm "${UPLOAD_PATH}"
-
-# Create VM with a small blank disk first
-log_info "Creating VM ${TEMPLATE_NAME} with blank disk..."
-govc vm.create \
-    -on=false \
-    -m=2048 \
-    -c=2 \
-    -g=ubuntu64Guest \
-    -disk=10GB \
-    -disk.controller=scsi \
-    -net="${VCENTER_NETWORK}" \
-    -net.adapter=vmxnet3 \
-    "${TEMPLATE_NAME}"
-
-# Remove the blank disk
-log_info "Removing blank disk..."
-govc vm.disk.remove -vm "${TEMPLATE_NAME}" -disk.name "disk-1000-0" || true
-
-# Attach the uploaded VMDK as the primary disk
-log_info "Attaching uploaded VMDK..."
-govc vm.disk.attach -vm "${TEMPLATE_NAME}" -disk "${FINAL_VMDK_PATH}" -controller scsi -unit 0
 
 # Add CD-ROM for cloud-init
 log_info "Adding CD-ROM for cloud-init..."
@@ -190,10 +178,29 @@ govc device.cdrom.add -vm "${TEMPLATE_NAME}" -device cdrom-3000
 
 # Configure VM for cloud-init
 log_info "Configuring VM for cloud-init..."
+
+# Generate cloud-init userdata that sets the default ubuntu password
+USERDATA_FILE="/tmp/${TEMPLATE_NAME}-userdata"
+cat > "${USERDATA_FILE}" <<'EOF'
+#cloud-config
+users:
+  - name: ubuntu
+    passwd: $6$rounds=4096$randomsalt$hashedpasswordplaceholder
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+ssh_pwauth: true
+disable_root: false
+EOF
+
+# Encode userdata as gzip+base64 for guestinfo
+USERDATA_B64=$(gzip -c "${USERDATA_FILE}" | base64 -w0)
+
 govc vm.change \
     -e="disk.EnableUUID=TRUE" \
     -e="guestinfo.metadata.encoding=gzip+base64" \
     -e="guestinfo.userdata.encoding=gzip+base64" \
+    -e="guestinfo.userdata=${USERDATA_B64}" \
     "${TEMPLATE_NAME}"
 
 # Set firmware to EFI (required for modern Ubuntu)
