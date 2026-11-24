@@ -413,8 +413,59 @@ fi
 log_info "Checking CD-ROM state after boot..."
 govc device.info -vm "${TEMPLATE_NAME}" cdrom-* 2>/dev/null | grep -iE "StartConnected|Connected" | sed 's/^/    /' || true
 
+# --- Direct configuration via VMware Tools ---
+# The base OVA ships with open-vm-tools enabled, so guest.run works from first
+# boot. Configure users/keys/passwords directly instead of relying solely on
+# cloud-init (which has proven unreliable across datasource/CD-ROM issues).
+log_info "Waiting for VMware Tools..."
+TOOLS_OK=false
+for i in $(seq 1 36); do
+    if govc guest.run -vm "${TEMPLATE_NAME}" -l "ubuntu:ubuntu" -- \
+            echo tools-ok 2>/dev/null | grep -q "tools-ok"; then
+        TOOLS_OK=true
+        break
+    fi
+    sleep 5
+done
+if [[ "${TOOLS_OK}" != "true" ]]; then
+    log_error "VMware Tools not responding — cannot configure the VM directly."
+    log_error "Check the VM console in vSphere."
+    exit 1
+fi
+log_info "VMware Tools is responding"
+
+log_info "Configuring users, passwords and SSH directly in the guest..."
+# Create lab user (ubuntu user already exists in the cloud image)
+govc guest.run -vm "${TEMPLATE_NAME}" -l "ubuntu:ubuntu" -- \
+    sudo useradd -m -s /bin/bash -G sudo lab 2>/dev/null || true
+
+# Set passwords (ubuntu + lab)
+govc guest.run -vm "${TEMPLATE_NAME}" -l "ubuntu:ubuntu" -- \
+    sudo sh -c "echo 'ubuntu:ubuntu' | chpasswd && echo 'lab:lab' | chpasswd"
+
+# Enable password + keyboard-interactive auth (overrides 60-cloudimg-settings.conf
+# which sets PasswordAuthentication no; 00- prefix wins first-match)
+govc guest.run -vm "${TEMPLATE_NAME}" -l "ubuntu:ubuntu" -- \
+    sudo sh -c "mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' > /etc/ssh/sshd_config.d/00-lab-password-auth.conf"
+
+# Inject SSH public keys for lab and ubuntu
+if [[ -n "${SSH_PUBLIC_KEY}" ]]; then
+    for KEY_USER in lab ubuntu; do
+        govc guest.run -vm "${TEMPLATE_NAME}" -l "ubuntu:ubuntu" -- \
+            sudo sh -c "mkdir -p /home/${KEY_USER}/.ssh && chmod 700 /home/${KEY_USER}/.ssh && \
+                grep -qF '${SSH_PUBLIC_KEY}' /home/${KEY_USER}/.ssh/authorized_keys 2>/dev/null || \
+                echo '${SSH_PUBLIC_KEY}' >> /home/${KEY_USER}/.ssh/authorized_keys && \
+                chmod 600 /home/${KEY_USER}/.ssh/authorized_keys && \
+                chown -R ${KEY_USER}:${KEY_USER} /home/${KEY_USER}/.ssh"
+        log_info "Injected SSH key for user '${KEY_USER}'"
+    done
+fi
+
+# Restart sshd to apply config
+govc guest.run -vm "${TEMPLATE_NAME}" -l "ubuntu:ubuntu" -- \
+    sudo systemctl restart ssh || sudo service ssh restart || true
+
 # Wait for cloud-init to actually finish (poll status instead of a fixed sleep).
-# cloud-init installs open-vm-tools, which takes 1-2 minutes.
 log_info "Waiting for cloud-init to complete..."
 CLOUD_INIT_DONE=false
 for i in $(seq 1 60); do
