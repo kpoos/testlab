@@ -39,10 +39,15 @@ resource "vsphere_virtual_machine" "node" {
   network_interface {
     network_id   = data.vsphere_network.network.id
     adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
-    # NIC connection state is inherited from the template; the template script
-    # explicitly connects the adapter before markastemplate so clones come up
-    # connected. Do not set mac_address here — vSphere assigns a unique MAC
-    # per clone during cloning.
+    # Unique MAC per clone: clones otherwise inherit the template's MAC and
+    # DHCP assigns them all the same IP. 02:50:56 is VMware's OUI; the last
+    # three octets are derived from the node's index in the nodes map.
+    mac_address = format(
+      "02:50:56:%02x:%02x:%02x",
+      1,
+      floor(index(keys(var.nodes), each.key) / 254) + 1,
+      (index(keys(var.nodes), each.key) % 254) + 1,
+    )
   }
 
   disk {
